@@ -10,7 +10,7 @@ const FORWARD_RES = ["content-type", "mcp-session-id", "cache-control"];
 
 export interface ProxyDeps {
   name: string; upstream: UpstreamConfig; resource: string; metadataUrl: string; publicAuthServer: string;
-  verifier: OAuthTokenVerifier; audit: (e: Record<string, unknown>) => void; fetchImpl?: typeof fetch;
+  verifier: OAuthTokenVerifier; getCredentials: (credId: string | undefined) => string | undefined; audit: (e: Record<string, unknown>) => void; fetchImpl?: typeof fetch;
 }
 
 /** Remove tools the policy hides from a tools/list result, in a JSON body or an SSE stream. */
@@ -55,6 +55,11 @@ export function upstreamRouter(d: ProxyDeps): Router {
       const listIds = new Set(msgs.filter((m) => m.method === "tools/list").map((m) => m.id));
 
       const headers: Record<string, string> = { ...(d.upstream.headers ?? {}) };
+      if (d.upstream.credentials) {
+        const creds = d.getCredentials(req.auth?.extra?.credId as string | undefined);
+        if (!creds) { res.status(401).set("www-authenticate", `Bearer error="invalid_token", resource_metadata="${d.metadataUrl}"`).json({ error: "invalid_token", error_description: "credentials missing; reconnect the connector" }); return; }
+        headers["x-upstream-credentials"] = Buffer.from(creds).toString("base64url");
+      }
       for (const h of FORWARD_REQ) { const v = req.header(h); if (v) headers[h] = v; }
       const ac = new AbortController();
       res.on("close", () => ac.abort());

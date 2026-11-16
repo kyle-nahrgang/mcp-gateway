@@ -2,13 +2,43 @@
   "publicUrl": "https://your-host.your-tailnet.ts.net",
   "port": 8092,
   "dataDir": "/home/USER/.local/share/mcp-gateway",
-  "google": { "clientId": "XXXX.apps.googleusercontent.com", "clientSecret": "FILL-IN" },
-  "allowedEmails": ["you@example.com"],
+  "google": {
+    "clientId": "XXXX.apps.googleusercontent.com",
+    "clientSecret": "FILL-IN"
+  },
+  "allowedEmails": [
+    "you@example.com"
+  ],
   "upstreams": {
     "life-timeline": {
       "url": "http://127.0.0.1:8091/mcp?agent=claude-cloud",
       "title": "Life timeline",
-      "tools": { "deny": ["confirm_*", "accept_*", "reject_*", "decline_*"] }
+      "tools": {
+        "deny": [
+          "confirm_*",
+          "accept_*",
+          "reject_*",
+          "decline_*"
+        ]
+      }
+    },
+    "anylist": {
+      "url": "http://127.0.0.1:8093/mcp",
+      "title": "AnyList",
+      "credentials": {
+        "title": "Connect AnyList",
+        "fields": [
+          {
+            "name": "username",
+            "label": "AnyList email"
+          },
+          {
+            "name": "password",
+            "label": "AnyList password",
+            "secret": true
+          }
+        ]
+      }
     }
   }
 }

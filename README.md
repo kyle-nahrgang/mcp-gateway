@@ -19,6 +19,10 @@ Only the gateway is published. Each upstream is named in `config.json`, gets its
 - **Audit log** (`audit.log` in `dataDir`): one JSON line per call with the upstream, account and tool names. Never arguments or results.
 - **Config refuses** upstreams that aren't loopback or tailnet addresses, so it can't be turned into an open proxy. Rate limit: 240 calls a minute per account, plus the SDK's limits on the OAuth endpoints.
 
+## Credentials entered at connect time
+
+An upstream can ask for its own credentials (see `anylist` in `config.example.json`). After Google sign-in the gateway shows a form; the values never go through claude.ai or Anthropic. They are stored AES-256-GCM encrypted (key in `secret.key` in the data directory, mode 600), tied to that connector's tokens, sent to the upstream only on loopback in `x-upstream-credentials`, never logged, and deleted when the connector is disconnected (token revocation) or if the tokens expire. Nothing is read from environment files. `deploy/anylist-http.mjs` is an example upstream that builds a per-user AnyList client from that header (`ANYLIST_MCP_DIR` points at a checkout of the AnyList MCP project).
+
 ## Set up
 
 1. Google Cloud console → APIs & Services → Credentials → Create OAuth client ID, type **Web application**. Authorized redirect URI: `https://HOST/google/callback`. Consent screen: external, in "testing" mode with your own account as the only test user. Scopes: `openid`, `email`.

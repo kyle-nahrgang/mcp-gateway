@@ -5,7 +5,7 @@ import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextproto
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { InvalidClientMetadataError, InvalidGrantError, InvalidTargetError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { Config } from "./config.js";
-import { Store, randomToken } from "./store.js";
+import { Store, randomToken, type Pending } from "./store.js";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -67,10 +67,40 @@ export class GatewayProvider implements OAuthServerProvider {
     const okIss = idToken.iss === "https://accounts.google.com" || idToken.iss === "accounts.google.com";
     if (!okIss || idToken.aud !== this.cfg.google.clientId || idToken.nonce !== pending.nonce || Number(idToken.exp) < nowSec() || idToken.email_verified !== true) return fail(403, "Sign-in could not be verified", { email });
     if (!this.cfg.allowedEmails.includes(email)) return fail(403, "This account is not allowed", { email });
+    const up = this.upstreamFor(pending.resource);
+    if (up?.credentials) { // second step: ask for the upstream's own credentials
+      const id = randomToken(24);
+      this.store.putPending({ ...pending, id, email, expiresAt: nowSec() + 600 });
+      return void this.page(res, formHtml(id, up.title ?? "this service", up.credentials));
+    }
+    this.finish(res, pending, email);
+  };
+
+  private upstreamFor(resource: string) {
+    for (const [n, u] of Object.entries(this.cfg.upstreams)) if (this.resourceUrl(n) === resource) return u;
+  }
+  private page(res: Response, html: string, status = 200) {
+    res.status(status).set({ "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff" }).type("html").send(html);
+  }
+  private finish(res: Response, pending: Pending, email: string, credId?: string) {
     const authCode = randomToken(32);
-    this.store.putCode(authCode, { clientId: pending.clientId, redirectUri: pending.redirectUri, codeChallenge: pending.codeChallenge, scopes: pending.scopes, resource: pending.resource, email, expiresAt: nowSec() + 300 });
-    this.audit({ event: "login", email, client_id: pending.clientId, resource: pending.resource });
-    back({ code: authCode });
+    this.store.putCode(authCode, { clientId: pending.clientId, redirectUri: pending.redirectUri, codeChallenge: pending.codeChallenge, scopes: pending.scopes, resource: pending.resource, email, expiresAt: nowSec() + 300, credId });
+    this.audit({ event: "login", email, client_id: pending.clientId, resource: pending.resource, credentials: Boolean(credId) });
+    const u = new URL(pending.redirectUri); u.searchParams.set("code", authCode); if (pending.state) u.searchParams.set("state", pending.state);
+    res.redirect(u.href);
+  }
+
+  /** POST from the credentials form. The id is a one-time secret handed out only after the Google check. */
+  handleCredentials = (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, string>;
+    const pending = this.store.takePending(String(body.id ?? ""));
+    const up = pending && this.upstreamFor(pending.resource);
+    if (!pending || !pending.email || !up?.credentials) { this.audit({ event: "credentials_refused" }); return this.page(res, msgHtml("This sign-in expired. Start again from Claude."), 400); }
+    const values: Record<string, string> = {};
+    for (const f of up.credentials.fields) { const v = String(body[f.name] ?? "").trim(); if (!v || v.length > 512) { this.store.putPending({ ...pending, expiresAt: nowSec() + 600 }); return this.page(res, formHtml(pending.id, up.title ?? "this service", up.credentials, `Please fill in ${f.label}.`), 400); } values[f.name] = v; }
+    const credId = randomToken(16);
+    this.store.putSecret(credId, JSON.stringify(values));
+    this.finish(res, pending, pending.email, credId);
   };
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, code: string): Promise<string> {
@@ -79,10 +109,10 @@ export class GatewayProvider implements OAuthServerProvider {
     return c.codeChallenge;
   }
 
-  private issue(clientId: string, scopes: string[], resource: string, email: string): OAuthTokens {
+  private issue(clientId: string, scopes: string[], resource: string, email: string, credId?: string): OAuthTokens {
     const access = randomToken(32), refresh = randomToken(32);
-    this.store.putToken(access, { kind: "access", clientId, scopes, resource, email, expiresAt: nowSec() + this.cfg.accessTokenTtlSec });
-    this.store.putToken(refresh, { kind: "refresh", clientId, scopes, resource, email, expiresAt: nowSec() + this.cfg.refreshTokenTtlSec });
+    this.store.putToken(access, { kind: "access", clientId, scopes, resource, email, credId, expiresAt: nowSec() + this.cfg.accessTokenTtlSec });
+    this.store.putToken(refresh, { kind: "refresh", clientId, scopes, resource, email, credId, expiresAt: nowSec() + this.cfg.refreshTokenTtlSec });
     return { access_token: access, token_type: "Bearer", expires_in: this.cfg.accessTokenTtlSec, refresh_token: refresh, scope: scopes.join(" ") };
   }
 
@@ -91,7 +121,7 @@ export class GatewayProvider implements OAuthServerProvider {
     if (!c || c.clientId !== client.client_id) throw new InvalidGrantError("invalid or expired code");
     if (redirectUri && redirectUri !== c.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     if (resource && resource.href !== c.resource) throw new InvalidTargetError("resource mismatch");
-    return this.issue(client.client_id, c.scopes, c.resource, c.email);
+    return this.issue(client.client_id, c.scopes, c.resource, c.email, c.credId);
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
@@ -99,14 +129,28 @@ export class GatewayProvider implements OAuthServerProvider {
     if (!t || t.clientId !== client.client_id) throw new InvalidGrantError("invalid or expired refresh token");
     if (resource && resource.href !== t.resource) throw new InvalidTargetError("resource mismatch");
     this.store.deleteToken(refreshToken); // rotate: the old refresh token dies here
-    return this.issue(client.client_id, scopes?.length ? scopes.filter((s) => t.scopes.includes(s)) : t.scopes, t.resource, t.email);
+    return this.issue(client.client_id, scopes?.length ? scopes.filter((s) => t.scopes.includes(s)) : t.scopes, t.resource, t.email, t.credId);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const t = this.store.getToken(token, "access");
     if (!t) throw new InvalidTokenError("invalid or expired token");
-    return { token, clientId: t.clientId, scopes: t.scopes, expiresAt: t.expiresAt, resource: new URL(t.resource), extra: { email: t.email } };
+    return { token, clientId: t.clientId, scopes: t.scopes, expiresAt: t.expiresAt, resource: new URL(t.resource), extra: { email: t.email, credId: t.credId } };
   }
 
-  async revokeToken(_client: OAuthClientInformationFull, req: { token: string }): Promise<void> { this.store.deleteToken(req.token); }
+  async revokeToken(_client: OAuthClientInformationFull, req: { token: string }): Promise<void> {
+    const t = this.store.findToken(req.token);
+    if (t?.credId) this.store.revokeCred(t.credId); else this.store.deleteToken(req.token);
+    this.audit({ event: "revoke", credentials: Boolean(t?.credId) });
+  }
+
+  credentialsFor(credId: string | undefined): string | undefined { return credId ? this.store.getSecret(credId) : undefined; }
+}
+
+const esc = (x: string) => x.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+const STYLE = "body{font:16px system-ui,sans-serif;max-width:26rem;margin:2rem auto;padding:0 1rem}label{display:block;margin:1rem 0 .25rem}input{width:100%;box-sizing:border-box;font:inherit;padding:.6rem}button{margin-top:1.5rem;font:inherit;padding:.7rem 1.2rem}.e{color:#b00020}small{color:#555}";
+function msgHtml(m: string) { return `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><style>${STYLE}</style><p>${esc(m)}</p>`; }
+function formHtml(id: string, service: string, c: NonNullable<import("./config.js").UpstreamConfig["credentials"]>, error?: string) {
+  const fields = c.fields.map((f) => `<label for="${esc(f.name)}">${esc(f.label)}</label><input id="${esc(f.name)}" name="${esc(f.name)}" type="${f.secret ? "password" : "text"}" autocomplete="${f.secret ? "current-password" : "username"}" required>`).join("");
+  return `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(c.title)}</title><style>${STYLE}</style><h1>${esc(c.title)}</h1>${error ? `<p class=e>${esc(error)}</p>` : ""}<p><small>${esc(c.help ?? `Used only to connect ${service} for this connector. Stored encrypted on your own server and deleted when you disconnect.`)}</small></p><form method="post" action="/credentials"><input type="hidden" name="id" value="${esc(id)}">${fields}<button type="submit">Connect</button></form>`;
 }

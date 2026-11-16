@@ -19,8 +19,9 @@ export function buildApp(cfg: Config, opts: { fetchImpl?: typeof fetch } = {}) {
   const issuer = new URL(cfg.publicUrl);
   app.use(mcpAuthRouter({ provider, issuerUrl: issuer, baseUrl: issuer, scopesSupported: ["mcp"], resourceName: "MCP gateway" }));
   app.get("/google/callback", provider.handleGoogleCallback);
+  app.post("/credentials", express.urlencoded({ extended: false, limit: "16kb" }), provider.handleCredentials);
   for (const [name, upstream] of Object.entries(cfg.upstreams)) {
-    app.use(upstreamRouter({ name, upstream, resource: provider.resourceUrl(name), metadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/${name}/mcp`, publicAuthServer: cfg.publicUrl, verifier: provider, audit, fetchImpl: opts.fetchImpl }));
+    app.use(upstreamRouter({ name, upstream, resource: provider.resourceUrl(name), metadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/${name}/mcp`, publicAuthServer: cfg.publicUrl, verifier: provider, getCredentials: (id) => provider.credentialsFor(id), audit, fetchImpl: opts.fetchImpl }));
   }
   app.use((_req, res) => { res.status(404).json({ error: "not_found" }); });
   const sweeper = setInterval(() => store.sweep(), 60_000); sweeper.unref();

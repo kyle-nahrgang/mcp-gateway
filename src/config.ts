@@ -14,6 +14,12 @@ export interface UpstreamConfig {
   /** Extra headers sent to the upstream (for example its own bearer token). Never sent to Claude. */
   headers?: Record<string, string>;
   title?: string;
+  /**
+   * Ask the person for credentials during sign-in (after Google). They are stored encrypted, tied to the
+   * connector's tokens, deleted when the connector is disconnected, and passed to the upstream on loopback
+   * in the x-upstream-credentials header (base64url JSON of field name -> value).
+   */
+  credentials?: { title: string; help?: string; fields: { name: string; label: string; secret?: boolean }[] };
 }
 
 export interface Config {
@@ -47,6 +53,8 @@ export function parseConfig(raw: unknown): Config {
   for (const [name, u] of Object.entries(upstreams)) {
     if (!NAME.test(name)) fail(`upstream name '${name}' must be lowercase letters, digits and dashes`);
     const url = new URL(u.url);
+    for (const f of u.credentials?.fields ?? []) if (!/^[a-z][a-z0-9_]{0,30}$/.test(f.name)) fail(`upstream '${name}': credential field '${f.name}' must be lowercase letters, digits and underscores`);
+    if (u.credentials && !u.credentials.fields?.length) fail(`upstream '${name}': credentials needs at least one field`);
     if (!isLocalHost(url.hostname)) fail(`upstream '${name}' must be a loopback or tailnet address, not ${url.hostname}`);
   }
   return {

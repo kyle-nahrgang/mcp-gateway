@@ -53,6 +53,7 @@ before(async () => {
     upstreams: {
       timeline: { url: `http://127.0.0.1:${upP}/mcp?agent=claude-cloud`, headers: { "x-upstream-key": "k1" }, tools: { deny: ["confirm_*", "accept_*"] } },
       other: { url: `http://127.0.0.1:${upP}/sse`, tools: { allow: ["search"] } },
+      list: { url: `http://127.0.0.1:${upP}/mcp`, title: "Lists", credentials: { title: "Connect Lists", fields: [{ name: "username", label: "Email" }, { name: "password", label: "Password", secret: true }] } },
     },
   });
   gw = buildApp(cfg).app.listen(gp, "127.0.0.1") as http.Server;
@@ -184,4 +185,62 @@ test("a Google account that is not on the allowlist is refused and logged", asyn
   const log = readFileSync(join(dir, "audit.log"), "utf8");
   assert.match(log, /"event":"login_refused"/);
   assert.ok(!/"arguments"/.test(log), "audit log must not record tool arguments");
+});
+
+async function credsToken() {
+  const resource = `${base}/list/mcp`;
+  const { client, verifier, r3 } = await signIn(resource);
+  assert.equal(r3.status, 200); // the form, not a redirect
+  const html = await r3.text();
+  assert.match(html, /type="password"/); assert.match(r3.headers.get("content-security-policy")!, /form-action 'self'/);
+  const id = /name="id" value="([^"]+)"/.exec(html)![1];
+  return { client, verifier, id, resource };
+}
+const post = (fields: Record<string, string>) => fetch(`${base}/credentials`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields), redirect: "manual" });
+
+test("credentials upstream: form after Google, creds stored encrypted, passed to upstream only, deleted on revoke", async () => {
+  const { client, verifier, id, resource } = await credsToken();
+  const r = await post({ id, username: "me@example.test", password: "hunter2-secret" });
+  assert.equal(r.status, 302);
+  const code = new URL(r.headers.get("location")!).searchParams.get("code")!;
+  const t = (await (await exchange(client.client_id, code, verifier, resource)).json()) as { access_token: string; refresh_token: string };
+  const res = await rpc("list", t.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(res.status, 200);
+  const hdr = seen[seen.length - 1].headers["x-upstream-credentials"] as string;
+  assert.deepEqual(JSON.parse(Buffer.from(hdr, "base64url").toString()), { username: "me@example.test", password: "hunter2-secret" });
+  // a client-supplied credentials header must never reach the upstream
+  await rpc("list", t.access_token, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { "x-upstream-credentials": Buffer.from('{"password":"evil"}').toString("base64url") });
+  assert.ok(!Buffer.from(seen[seen.length - 1].headers["x-upstream-credentials"] as string, "base64url").toString().includes("evil"));
+  // not readable in the database file, the audit log, or the logs
+  const raw = readFileSync(join(dir, "gateway.db")).toString("latin1") + readFileSync(join(dir, "audit.log"), "utf8");
+  assert.ok(!raw.includes("hunter2-secret") && !raw.includes("me@example.test"), "credentials must not appear in plaintext at rest");
+  // other upstreams never get the header
+  const o = await token("timeline"); await rpc("timeline", o.access_token, { jsonrpc: "2.0", id: 3, method: "tools/list" });
+  assert.equal(seen[seen.length - 1].headers["x-upstream-credentials"], undefined);
+  // disconnect: revoke deletes the credentials and every token
+  const rv = await fetch(`${base}/revoke`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: client.client_id, token: t.refresh_token }) });
+  assert.equal(rv.status, 200);
+  assert.equal((await rpc("list", t.access_token, { jsonrpc: "2.0", id: 4, method: "tools/list" })).status, 401);
+});
+
+test("credentials form: id is single use, empty fields re-show the form, unknown id is refused", async () => {
+  const { id } = await credsToken();
+  assert.equal((await post({ id, username: "", password: "" })).status, 400); // form again, id still valid
+  assert.equal((await post({ id, username: "a@b.c", password: "pw" })).status, 302);
+  assert.equal((await post({ id, username: "a@b.c", password: "pw" })).status, 400); // used up
+  assert.equal((await post({ id: "nope", username: "a@b.c", password: "pw" })).status, 400);
+});
+
+test("an unknown credentials id is refused: the form needs a prior Google check", async () => {
+  // no Google step -> no pending row with an email -> refused
+  assert.equal((await post({ id: "x".repeat(32), username: "a@b.c", password: "pw" })).status, 400);
+});
+
+test("credentials upstream: a token without stored credentials is told to reconnect", async () => {
+  const { client, verifier, id, resource } = await credsToken();
+  const code = new URL((await post({ id, username: "a@b.c", password: "pw" })).headers.get("location")!).searchParams.get("code")!;
+  const t = (await (await exchange(client.client_id, code, verifier, resource)).json()) as { access_token: string };
+  await fetch(`${base}/revoke`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: client.client_id, token: t.access_token }) });
+  const r = await rpc("list", t.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(r.status, 401);
 });
