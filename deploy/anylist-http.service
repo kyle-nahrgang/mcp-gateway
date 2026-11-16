@@ -4,6 +4,8 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=%h/workspace/mcp-gateway
+# Optional: read the AnyList login from a local file instead of the gateway's credentials form
+Environment=ANYLIST_CREDENTIALS_FILE=%h/.config/anylist-mcp/env
 ExecStart=/usr/bin/env node deploy/anylist-http.mjs
 Restart=on-failure
 RestartSec=3

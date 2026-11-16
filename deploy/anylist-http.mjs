@@ -1,12 +1,18 @@
 // Single-purpose HTTP front for the AnyList MCP server, for use behind mcp-gateway.
-// Listens on loopback only. Credentials arrive per request from the gateway in x-upstream-credentials
-// (base64url JSON {username, password}); nothing is read from the environment or written to disk.
+// Listens on loopback only. Credentials come from one of two places:
+//   - per request from the gateway in x-upstream-credentials (base64url JSON {username, password}),
+//     when the upstream is configured with a credentials form; or
+//   - a local file named by ANYLIST_CREDENTIALS_FILE (KEY=VALUE lines: ANYLIST_USERNAME,
+//     ANYLIST_PASSWORD, optional ANYLIST_LIST_NAME), re-read on each request. Keep it mode 600.
+// The header wins when both are present. Nothing is written to disk.
 //
-//   ANYLIST_MCP_DIR  path to a checkout of the anylist-mcp project (default ~/workspace/anylist-mcp)
-//   PORT             default 8093
+//   ANYLIST_MCP_DIR          path to a checkout of the anylist-mcp project (default ~/workspace/anylist-mcp)
+//   ANYLIST_CREDENTIALS_FILE optional credentials file (see above)
+//   PORT                     default 8093
 import http from "node:http";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -30,10 +36,28 @@ function clientFor(creds) {
 }
 setInterval(() => { for (const [k, e] of clients) if (Date.now() - e.last > IDLE_MS) clients.delete(k); }, 60_000).unref();
 
+// KEY=VALUE lines; split on the first "=", optional surrounding quotes; "#" lines are comments.
+function fileCreds() {
+  const path = process.env.ANYLIST_CREDENTIALS_FILE;
+  if (!path) return undefined;
+  let text; try { text = readFileSync(path, "utf8"); } catch { return undefined; }
+  const v = {};
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim() || line.trimStart().startsWith("#") || !line.includes("=")) continue;
+    const i = line.indexOf("="); let val = line.slice(i + 1).trim();
+    if (val.length > 1 && (val[0] === '"' || val[0] === "'") && val.at(-1) === val[0]) val = val.slice(1, -1);
+    v[line.slice(0, i).trim()] = val;
+  }
+  if (v.ANYLIST_LIST_NAME) process.env.ANYLIST_LIST_NAME = v.ANYLIST_LIST_NAME;
+  return { username: v.ANYLIST_USERNAME, password: v.ANYLIST_PASSWORD };
+}
+
 const server = http.createServer(async (req, res) => {
   if (!req.url?.startsWith("/mcp")) { res.writeHead(404).end(); return; }
   let creds;
-  try { creds = JSON.parse(Buffer.from(String(req.headers["x-upstream-credentials"] ?? ""), "base64url").toString()); } catch { /* handled below */ }
+  const header = req.headers["x-upstream-credentials"];
+  if (header) { try { creds = JSON.parse(Buffer.from(String(header), "base64url").toString()); } catch { /* handled below */ } }
+  else creds = fileCreds();
   if (!creds?.username || !creds?.password) { res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "credentials required" })); return; }
   const chunks = []; for await (const c of req) chunks.push(c);
   let body; try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined; } catch { res.writeHead(400).end(); return; }

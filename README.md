@@ -21,7 +21,7 @@ Only the gateway is published. Each upstream is named in `config.json`, gets its
 
 ## Credentials entered at connect time
 
-An upstream can ask for its own credentials (see `anylist` in `config.example.json`). After Google sign-in the gateway shows a form; the values never go through claude.ai or Anthropic. They are stored AES-256-GCM encrypted (key in `secret.key` in the data directory, mode 600), tied to that connector's tokens, sent to the upstream only on loopback in `x-upstream-credentials`, never logged, and deleted when the connector is disconnected (token revocation) or if the tokens expire. Nothing is read from environment files. `deploy/anylist-http.mjs` is an example upstream that builds a per-user AnyList client from that header (`ANYLIST_MCP_DIR` points at a checkout of the AnyList MCP project).
+An upstream can ask for its own credentials (see `anylist` in `config.example.json`). After Google sign-in the gateway shows a form; the values never go through claude.ai or Anthropic. They are stored AES-256-GCM encrypted (key in `secret.key` in the data directory, mode 600), tied to that connector's tokens, sent to the upstream only on loopback in `x-upstream-credentials`, never logged, and deleted when the connector is disconnected (token revocation) or if the tokens expire. `deploy/anylist-http.mjs` is an example upstream that builds a per-user AnyList client from that header (`ANYLIST_MCP_DIR` points at a checkout of the AnyList MCP project). For a single user, it can instead read the login from a local file (`ANYLIST_CREDENTIALS_FILE`, mode 600); then leave `credentials` off that upstream.
 
 ## Set up
 
